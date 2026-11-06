@@ -620,6 +620,13 @@ class Message
      * @param \SimpleSAML\Configuration $spMetadata The metadata of the service provider.
      * @param \SimpleSAML\Configuration $idpMetadata The metadata of the identity provider.
      * @param \SAML2\Response $response The response.
+     * @param string|null $expectedRequestId
+     *    The AuthnRequest ID that this Response is expected to correlate with (solicited / SP-initiated flow).
+     *    Caller guarantee: when $isUnsolicited is false, this MUST be the original AuthnRequest ID the SP created.
+     * @param bool $isUnsolicited
+     *    Whether the Response is processed as unsolicited (IdP-initiated).
+     * @param string|null $expectedIssuer
+     *    If set, the Response (or Assertion, if Response Issuer is missing) MUST be issued by this entityID.
      *
      * @return array Array with \SAML2\Assertion objects, containing valid assertions from the response.
      *
@@ -629,7 +636,10 @@ class Message
     public static function processResponse(
         Configuration $spMetadata,
         Configuration $idpMetadata,
-        Response $response
+        Response $response,
+        ?string $expectedRequestId = null,
+        bool $isUnsolicited = false,
+        ?string $expectedIssuer = null
     ) {
         if (!$response->isSuccess()) {
             throw self::getResponseError($response);
@@ -643,7 +653,63 @@ class Message
                 $msgDestination . '", current URL is "' . $currentURL . '".');
         }
 
+        // Resolve issuer (Response Issuer MAY be missing; fall back to first unencrypted Assertion issuer)
+        $issuer = $response->getIssuer();
+        if ($issuer === null) {
+            foreach ($response->getAssertions() as $a) {
+                if ($a instanceof Assertion) {
+                    $issuer = $a->getIssuer();
+                    break;
+                }
+            }
+        }
+        $issuerValue = $issuer === null ? null : $issuer->getValue();
+
+        // Expected issuer binding (when provided, issuer must be resolvable and must match)
+        if ($expectedIssuer !== null) {
+            if ($issuerValue === null) {
+                throw new SSP_Error\Exception(
+                    'Missing issuer in Response/Assertion; cannot enforce expected issuer ' .
+                    var_export($expectedIssuer, true) . '.'
+                );
+            }
+
+            if ($issuerValue !== $expectedIssuer) {
+                throw new SSP_Error\Exception(
+                    'Issuer mismatch. Expected ' . var_export($expectedIssuer, true) .
+                    ', got ' . var_export($issuerValue, true) . '.'
+                );
+            }
+        }
+
         $responseSigned = self::checkSign($idpMetadata, $response);
+
+        $responseInResponseTo = $response->getInResponseTo();
+
+        // Hard policy:
+        // - unsolicited: MUST NOT contain Response/@InResponseTo
+        // - solicited: MUST contain Response/@InResponseTo and MUST match the expected request ID
+        if ($isUnsolicited) {
+            if ($responseInResponseTo !== null) {
+                throw new SSP_Error\Exception(
+                    'Unsolicited Response MUST NOT contain InResponseTo. Got: ' .
+                    var_export($responseInResponseTo, true)
+                );
+            }
+        } else {
+            if ($expectedRequestId === null || $expectedRequestId === '') {
+                throw new SSP_Error\Exception('Missing expected request ID for solicited Response validation.');
+            }
+            if ($responseInResponseTo === null) {
+                throw new SSP_Error\Exception('Solicited Response must contain InResponseTo.');
+            }
+            if ($responseInResponseTo !== $expectedRequestId) {
+                throw new SSP_Error\Exception(
+                    'Response InResponseTo does not match expected request ID. Expected ' .
+                    var_export($expectedRequestId, true) . ', got ' . var_export($responseInResponseTo, true) . '.'
+                );
+            }
+        }
 
         /*
          * When we get this far, the response itself is valid.
@@ -656,7 +722,15 @@ class Message
 
         $ret = [];
         foreach ($assertion as $a) {
-            $ret[] = self::processAssertion($spMetadata, $idpMetadata, $response, $a, $responseSigned);
+            $ret[] = self::processAssertion(
+                $spMetadata,
+                $idpMetadata,
+                $response,
+                $a,
+                $responseSigned,
+                $expectedRequestId,
+                $isUnsolicited
+            );
         }
 
         return $ret;
@@ -671,6 +745,8 @@ class Message
      * @param \SAML2\Response $response The response containing the assertion.
      * @param \SAML2\Assertion|\SAML2\EncryptedAssertion $assertion The assertion.
      * @param bool $responseSigned Whether the response is signed.
+     * @param string|null $expectedRequestId The AuthnRequest ID we expect this response to be correlated with.
+     * @param bool $isUnsolicited Whether this response is being processed as unsolicited (IdP-initiated).
      *
      * @return \SAML2\Assertion The assertion, if it is valid.
      *
@@ -684,7 +760,9 @@ class Message
         Configuration $idpMetadata,
         Response $response,
         $assertion,
-        bool $responseSigned
+        bool $responseSigned,
+        ?string $expectedRequestId,
+        bool $isUnsolicited
     ): Assertion {
         assert($assertion instanceof Assertion || $assertion instanceof EncryptedAssertion);
 
@@ -854,13 +932,45 @@ class Message
                 continue;
             }
             $inResponseTo = $scd->getInResponseTo();
-            if (
-                $inResponseTo !== null
-                && $response->getInResponseTo() !== null
-                && $inResponseTo !== $response->getInResponseTo()
-            ) {
+            $responseInResponseTo = $response->getInResponseTo();
+
+            // Hard policy: unsolicited responses MUST NOT contain any InResponseTo values.
+            if ($isUnsolicited) {
+                if ($inResponseTo !== null) {
+                    $lastError = 'Unsolicited Response MUST NOT contain SubjectConfirmationData InResponseTo.';
+                    continue;
+                }
+                if ($responseInResponseTo !== null) {
+                    $lastError = 'Unsolicited Response MUST NOT contain Response InResponseTo.';
+                    continue;
+                }
+                $found = true;
+                break;
+            }
+
+            if ($expectedRequestId === null || $expectedRequestId === '') {
+                $lastError = 'Missing expected request ID for solicited Response validation.';
+                continue;
+            }
+
+            // Hard policy for solicited responses:
+            // SubjectConfirmationData MUST contain InResponseTo and MUST match the request ID, and MUST match Response.
+            if ($inResponseTo === null) {
+                $lastError = 'Solicited Response requires SubjectConfirmationData InResponseTo.';
+                continue;
+            }
+            if ($inResponseTo !== $expectedRequestId) {
+                $lastError = 'InResponseTo in SubjectConfirmationData does not match expected request ID. Expected ' .
+                    var_export($expectedRequestId, true) . ', got ' . var_export($inResponseTo, true) . '.';
+                continue;
+            }
+            if ($responseInResponseTo === null) {
+                $lastError = 'Solicited Response must contain Response InResponseTo.';
+                continue;
+            }
+            if ($inResponseTo !== $responseInResponseTo) {
                 $lastError = 'InResponseTo in SubjectConfirmationData does not match the Response. Response has ' .
-                    var_export($response->getInResponseTo(), true) .
+                    var_export($responseInResponseTo, true) .
                     ', SubjectConfirmationData has ' . var_export($inResponseTo, true) . '.';
                 continue;
             }

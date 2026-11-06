@@ -110,16 +110,17 @@ if ($state) {
         );
     }
 
-    // check that the issuer is the one we are expecting
+    // check that the issuer is the one we are expecting (strict binding for SP-initiated flows)
     assert(array_key_exists('ExpectedIssuer', $state));
     if ($state['ExpectedIssuer'] !== $issuer) {
-        $idpMetadata = $source->getIdPMetadata($issuer);
-        $idplist = $idpMetadata->getArrayize('IDPList', []);
-        if (!in_array($state['ExpectedIssuer'], $idplist, true)) {
-            SimpleSAML\Logger::warning(
-                'The issuer of the response not match to the identity provider we sent the request to.'
-            );
-        }
+        SimpleSAML\Logger::error(
+            'The issuer of the response does not match the identity provider we sent the request to.'
+        );
+
+        throw new \SimpleSAML\Error\Exception(
+            'Issuer mismatch: expected ' . var_export($state['ExpectedIssuer'], true) .
+            ', got ' . var_export($issuer, true) . '.'
+        );
     }
 } else {
     // this is an unsolicited response
@@ -138,11 +139,22 @@ if (is_null($idpMetadata)) {
 }
 
 try {
-    $assertions = \SimpleSAML\Module\saml\Message::processResponse($spMetadata, $idpMetadata, $response);
+    $isUnsolicited = (bool) ($state['saml:sp:isUnsolicited'] ?? false);
+    $expectedRequestId = $isUnsolicited ? null : ($stateId ?: null);
+
+    $assertions = \SimpleSAML\Module\saml\Message::processResponse(
+        $spMetadata,
+        $idpMetadata,
+        $response,
+        $expectedRequestId,
+        $isUnsolicited,
+        $isUnsolicited ? null : ($state['ExpectedIssuer'] ?? null)
+    );
 } catch (\SimpleSAML\Module\saml\Error $e) {
     // the status of the response wasn't "success"
-    $e = $e->toException();
-    \SimpleSAML\Auth\State::throwException($state, $e);
+    $ex = $e->toException();
+    \SimpleSAML\Auth\State::throwException($state, $ex);
+    throw $ex;
 }
 
 $authenticatingAuthority = null;
