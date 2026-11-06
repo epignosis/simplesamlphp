@@ -5,6 +5,29 @@
 This document lists the changes between versions of SimpleSAMLphp.
 See the upgrade notes for specific information about upgrading.
 
+## Version 1.19.9.2 (Epignosis fork)
+
+Released 2026-11-06 by Epignosis LLC, in the epignosis/simplesamlphp fork.
+
+* Added modification notices to the files changed in 1.19.9.1, as required by section 2(b) of the GNU LGPL v2.1.
+  No functional changes.
+
+## Version 1.19.9.1 (Epignosis fork)
+
+Released 2026-11-06 by Epignosis LLC, in the epignosis/simplesamlphp fork.
+Not an upstream release: SimpleSAMLphp 1.19 is end-of-life.
+
+* Backport of the fix for CVE-2026-49284 / GHSA-q8r6-xj3f-wrrm (SP accepts a response from an unexpected IdP when
+  an unsigned `Response/InResponseTo` is combined with a signed assertion lacking `SubjectConfirmationData/InResponseTo`),
+  from upstream commit 51b678cb62 (released in 2.4.6 and 2.5.2). Behaviour only, without the upstream refactors and
+  the optional `saml2int.conf.php` policy. Files changed:
+  * `modules/saml/www/sp/saml2-acs.php`: a solicited response whose issuer differs from `ExpectedIssuer` is rejected
+    (was a warning).
+  * `modules/saml/lib/Message.php`: `processResponse()` binds the response to the expected issuer and enforces
+    `InResponseTo` (unsolicited responses must not carry it; solicited ones must carry it and match the AuthnRequest
+    ID); `processAssertion()` applies the same rules to `SubjectConfirmationData`.
+  * `composer.json`: `version` set to the fork's release number.
+
 ## Version 1.19.9
 
 Released 2024-02-23

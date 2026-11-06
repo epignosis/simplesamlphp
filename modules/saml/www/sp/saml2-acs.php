@@ -1,5 +1,12 @@
 <?php
 
+/*
+ * Modified by Epignosis LLC on 2026-11-06: backport of the CVE-2026-49284 / GHSA-q8r6-xj3f-wrrm fix
+ * (upstream commit 51b678cb62, SimpleSAMLphp 2.4.6 / 2.5.2) to the ExpectedIssuer check and the
+ * processResponse() call. See docs/simplesamlphp-changelog.md, version 1.19.9.1.
+ * Licensed under the GNU LGPL v2.1 or later (see LICENSE).
+ */
+
 /**
  * Assertion consumer service handler for SAML 2.0 SP authentication client.
  */
